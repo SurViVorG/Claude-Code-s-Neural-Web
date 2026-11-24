@@ -1,0 +1,15 @@
+{
+  "name": "neural-web",
+  "version": "1.0.0",
+  "description": "A live neural-network style map of the files and directories Claude Code is working in.",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "demo": "node server.js --demo",
+    "hook-config": "node scripts/print-hook-config.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
