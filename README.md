@@ -78,13 +78,20 @@ Merge it into one of Claude Code's settings files:
 | `<project>/.claude/settings.json` | one project, shared with your team |
 | `<project>/.claude/settings.local.json` | one project, just for you |
 
-If the file already has a `"hooks"` section, add the `SessionStart` and `PostToolUse`
-entries to it instead of replacing it. Restart Claude Code (or run `/hooks` to check it was
+If the file already has a `"hooks"` section, add the `SessionStart`, `SessionEnd`,
+`PreToolUse` and `PostToolUse` entries to it instead of replacing it. Restart Claude Code (or run `/hooks` to check it was
 picked up).
 
 The hooks do different jobs:
 
 - **`PostToolUse`** records every file Claude touches. This one is required.
+- **`PreToolUse`** (`Bash|PowerShell`) snapshots the working directory (file sizes and
+  modification times only) right before a shell command runs. `PostToolUse` compares it
+  afterwards, so the map shows each file the command **created, edited or deleted**, plus the
+  existing files named in the command (e.g. `node server.js`). Big folders such as `.git`,
+  `node_modules`, `dist` and `build` are skipped and the scan stops after ~400 ms.
+  Without this hook a command only lights up its working directory.
+- **`SessionEnd`** marks a session as closed, so **Live sessions** stops showing it.
 - **`SessionStart` → `log-activity.js`** records the folder each session was opened in, so it
   becomes that session's root neuron straight away, before Claude touches anything.
 - **`SessionStart`** (optional) opens the Neural Web automatically: when a Claude Code
@@ -116,21 +123,29 @@ as soon as Claude touches a file.
 | Element | Meaning |
 | --- | --- |
 | Big white-cored neuron | Project root (the directory Claude Code was started in) |
-| Ringed neuron | Directory — grows with the number of children |
-| Solid neuron | File — grows with the number of times it was touched |
+| Ringed neuron | Directory — grows with the number of items in it |
+| Dashed outer ring | Collapsed directory; the label shows how many items are hidden |
+| Solid neuron | File — grows with the number of times it was touched (untouched files are dim) |
+| Red slash | A file a shell command deleted |
 | Travelling spark | A tool call happening right now, flowing from the root to its target |
 | Expanding ring | The moment the target was reached |
-| Glow | Recent activity; fades out over ~20 seconds |
+| Glow | Recent activity; fades out over ~20 seconds. Activity inside a collapsed folder lights up the folder |
+
+Every file under each session's base folder is shown, laid out as a fixed radial tree (nothing
+drifts or wobbles). Folders open by default until about 1,200 neurons are on screen; the rest,
+and big generated folders such as `.git`, `node_modules`, `dist` and `build`, start
+collapsed and are listed only when you click them.
 
 Colours show the last action on each neuron:
 
 | Colour | Action | Tools |
 | --- | --- | --- |
 | 🔵 cyan | read | `Read` |
-| 🟣 magenta | edit | `Edit`, `MultiEdit`, `NotebookEdit` |
-| 🟠 orange | write | `Write` (create / overwrite) |
+| 🟣 magenta | edit | `Edit`, `MultiEdit`, `NotebookEdit`, or a file a shell command modified |
+| 🟠 orange | write | `Write` (create / overwrite), or a file a shell command created |
 | 🟡 yellow | search | `Glob`, `Grep` (on the searched directory) |
-| 🟢 green | exec | `Bash`, `PowerShell` (on the working directory) |
+| 🟢 green | exec | `Bash`, `PowerShell` — files named in the command (or the working directory) |
+| 🔴 red | delete | a file a `Bash` / `PowerShell` command deleted |
 | ⚪ white | session start | the folder Claude Code was opened in |
 
 Files outside the project root (for example `~/.claude/...`) appear as their own small
@@ -142,15 +157,15 @@ clusters, rooted at their parent directory.
 | --- | --- |
 | Zoom | Mouse wheel / trackpad scroll |
 | Pan | Drag the background |
-| Move a neuron | Drag it |
-| Focus a neuron | Click it, or click an entry in the live feed |
+| Show / hide a folder's contents | Click the folder |
+| Expand / collapse everything | **Expand all** / **Collapse all** |
+| Focus a file | Click it, or click an entry in the live feed (opens the folders above it) |
 | Details | Hover a neuron: full path, touch count, actions breakdown, last touched |
 | Fit everything | **Fit view** button or `f` |
-| Freeze the layout | **Pause** button or `Space` |
-| Follow Claude | **Follow** checkbox — the camera glides to each new touch (turns off when you pan) |
+| Follow Claude | **Follow** checkbox (off by default) — the camera moves to each new touch (turns off when you pan) |
 | Show every label | **All labels** checkbox |
 | Highlight paths | Type in **Highlight path…** (matches any part of the full path) |
-| Current session | **Current session** (default) shows only the session Claude is working in now, and switches by itself when a new session starts in another folder (or the shown one has been idle for 2 minutes) |
+| Live sessions | **Live sessions** (default) shows every Claude Code console that is open right now, side by side. A session leaves the map when it ends (`SessionEnd` hook) or after 2 hours without activity; if none is open, the most recent one is shown |
 | One session only | Session dropdown (project · start time · number of signals) |
 | All sessions | **All sessions** in the dropdown |
 | Panel | **Panel** button hides/shows the side panel |
@@ -158,7 +173,7 @@ clusters, rooted at their parent directory.
 
 The status dot next to the title is green while the browser is connected to the server. Under the
 title, **opened in** shows the folder the shown session started in and **working in** the folder of
-Claude's latest touch.
+Claude's latest touch. With several live sessions there is one line per session.
 
 ## Configuration
 
@@ -190,13 +205,14 @@ last 20,000 lines.
 
 - Everything stays on your machine. The server only listens on `127.0.0.1`.
 - The hook only records **paths**, the tool name, and the session id — never file contents
-  or command text.
+  or command text. Shell-command snapshots (paths, sizes, modification times) live in the
+  system temp folder and are deleted as soon as the command finishes.
 - The hook never blocks Claude Code: it swallows every error, prints nothing, and always
   exits with code 0.
 
 ## Uninstall
 
-Remove the `SessionStart` and `PostToolUse` entries from your `settings.json`, stop the
+Remove the `SessionStart`, `SessionEnd`, `PreToolUse` and `PostToolUse` entries from your `settings.json`, stop the
 server (it keeps running in the background if the autostart hook launched it — close the
 `node` process listening on port 4747), and delete `~/.claude/neural-web/`.
 

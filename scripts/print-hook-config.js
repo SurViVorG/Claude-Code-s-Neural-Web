@@ -21,6 +21,19 @@ const config = {
         hooks: [{ type: 'command', command: `node "${hook}"` }],
       },
     ],
+    SessionEnd: [
+      {
+        // marks the session as closed, so the UI stops showing it as live
+        hooks: [{ type: 'command', command: `node "${hook}"` }],
+      },
+    ],
+    PreToolUse: [
+      {
+        // snapshots the working directory so the files a command changed can be found
+        matcher: 'Bash|PowerShell',
+        hooks: [{ type: 'command', command: `node "${hook}"` }],
+      },
+    ],
     PostToolUse: [
       {
         matcher: 'Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep|Bash|PowerShell',

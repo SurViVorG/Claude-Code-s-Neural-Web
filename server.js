@@ -34,15 +34,11 @@ function parseLine(line) {
   }
 }
 
-function readHistory() {
+function readHistory(all) {
   if (DEMO) return demoEvents.slice(-MAX_HISTORY);
   try {
-    return fs
-      .readFileSync(LOG, 'utf8')
-      .split('\n')
-      .slice(-MAX_HISTORY - 1)
-      .map(parseLine)
-      .filter(Boolean);
+    const lines = fs.readFileSync(LOG, 'utf8').split('\n');
+    return (all ? lines : lines.slice(-MAX_HISTORY - 1)).map(parseLine).filter(Boolean);
   } catch {
     return [];
   }
@@ -51,6 +47,95 @@ function readHistory() {
 function broadcast(msg) {
   const data = `data: ${JSON.stringify(msg)}\n\n`;
   for (const res of clients) res.write(data);
+}
+
+/* ---------- directory trees (every file under each session's base folder) ---------- */
+// big generated folders: listed, but their contents load only when clicked
+const SKIP_DIRS = new Set([
+  '.git', 'node_modules', '.next', '.nuxt', '.svelte-kit', '.turbo', '.cache', '.parcel-cache',
+  'dist', 'build', 'out', 'coverage', 'target', 'vendor', '.venv', 'venv', '__pycache__',
+  '.idea', '.vs', '.gradle', 'bin', 'obj',
+]);
+const TREE_LIMIT = 5000; // entries per request; folders past it are sent unloaded
+
+function normKey(p) {
+  const s = String(p).replace(/\\/g, '/').replace(/(.)\/+$/, '$1');
+  return process.platform === 'win32' ? s.toLowerCase() : s;
+}
+
+// only folders Claude Code sessions worked in (and what is below them) may be listed
+const knownRoots = new Set();
+function noteRoots(ev) {
+  if (ev.cwd) knownRoots.add(normKey(ev.cwd));
+  if (ev.action === 'start') knownRoots.add(normKey(ev.path));
+}
+function allowedPath(p) {
+  const k = normKey(p);
+  for (const r of knownRoots) if (k === r || k.startsWith(r + '/')) return true;
+  return false;
+}
+
+// { n: name, d: 1 if dir, c: [children] (absent = not loaded yet), s: 1 if skipped }
+function buildTree(dir) {
+  const root = { n: path.basename(dir) || dir, d: 1 };
+  const queue = [[root, dir]];
+  let count = 0;
+  while (queue.length && count < TREE_LIMIT) {
+    const [node, p] = queue.shift();
+    let entries;
+    try {
+      entries = fs.readdirSync(p, { withFileTypes: true });
+    } catch {
+      node.c = [];
+      continue;
+    }
+    node.c = [];
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        const c = { n: e.name, d: 1 };
+        if (SKIP_DIRS.has(e.name)) c.s = 1;
+        else queue.push([c, path.join(p, e.name)]);
+        node.c.push(c);
+      } else {
+        node.c.push({ n: e.name });
+      }
+    }
+    count += entries.length;
+  }
+  return root;
+}
+
+const DEMO_ROOT = '/demo/my-app';
+const DEMO_FILES = [
+  'src/index.ts', 'src/app.ts', 'src/routes/users.ts', 'src/routes/auth.ts',
+  'src/routes/posts.ts', 'src/routes/comments.ts', 'src/db/schema.ts', 'src/db/client.ts',
+  'src/db/migrations/001_init.sql', 'src/db/migrations/002_posts.sql', 'src/lib/http.ts',
+  'src/lib/logger.ts', 'src/lib/cache.ts', 'src/components/Button.tsx', 'src/components/Modal.tsx',
+  'src/components/Card.tsx', 'src/components/forms/LoginForm.tsx',
+  'src/components/forms/SignupForm.tsx', 'tests/users.test.ts', 'tests/auth.test.ts',
+  'tests/posts.test.ts', 'package.json', 'README.md', 'tsconfig.json', '.gitignore',
+  'docs/architecture.md', 'docs/api.md', 'scripts/seed.js', 'public/favicon.ico', 'public/logo.svg',
+];
+
+function demoTree(p) {
+  const root = { n: 'my-app', d: 1, c: [{ n: 'node_modules', d: 1, s: 1 }] };
+  for (const f of DEMO_FILES) {
+    let node = root;
+    const segs = f.split('/');
+    segs.forEach((seg, i) => {
+      let c = node.c.find((x) => x.n === seg);
+      if (!c) {
+        c = i === segs.length - 1 ? { n: seg } : { n: seg, d: 1, c: [] };
+        node.c.push(c);
+      }
+      node = c;
+    });
+  }
+  let node = root;
+  for (const seg of String(p).slice(DEMO_ROOT.length).split('/').filter(Boolean)) {
+    node = (node.c || []).find((x) => x.n === seg) || { n: seg, d: 1, c: [] };
+  }
+  return node.c ? node : { ...node, c: [] };
 }
 
 /* ---------- tail the log file ---------- */
@@ -83,7 +168,10 @@ function tailLog() {
       pending = lines.pop();
       for (const line of lines) {
         const ev = parseLine(line);
-        if (ev) broadcast({ type: 'event', event: ev });
+        if (ev) {
+          noteRoots(ev);
+          broadcast({ type: 'event', event: ev });
+        }
       }
     } catch (err) {
       console.error('[neural-web] read error:', err.message);
@@ -95,15 +183,8 @@ function tailLog() {
 
 /* ---------- demo generator ---------- */
 function startDemo() {
-  const cwd = '/demo/my-app';
-  const files = [
-    'src/index.ts', 'src/app.ts', 'src/routes/users.ts', 'src/routes/auth.ts',
-    'src/routes/posts.ts', 'src/db/schema.ts', 'src/db/migrations/001_init.sql',
-    'src/lib/http.ts', 'src/lib/logger.ts', 'src/components/Button.tsx',
-    'src/components/Modal.tsx', 'src/components/forms/LoginForm.tsx',
-    'tests/users.test.ts', 'tests/auth.test.ts', 'package.json', 'README.md',
-    'tsconfig.json', 'docs/architecture.md', 'scripts/seed.js',
-  ];
+  const cwd = DEMO_ROOT;
+  const files = DEMO_FILES;
   const dirs = ['src', 'src/routes', 'src/components', 'tests', 'docs'];
   const weighted = [
     ['read', 'Read', 5], ['edit', 'Edit', 3], ['write', 'Write', 1],
@@ -143,6 +224,11 @@ function startDemo() {
 }
 
 /* ---------- http ---------- */
+const json = (res, body) => {
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(body));
+};
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
@@ -158,14 +244,26 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/status') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, demo: DEMO, clients: clients.size }));
+    json(res, { ok: true, demo: DEMO, clients: clients.size });
     return;
   }
 
   if (req.method === 'GET' && url.pathname === '/api/history') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ demo: DEMO, log: DEMO ? null : LOG, events: readHistory() }));
+    json(res, { demo: DEMO, log: DEMO ? null : LOG, events: readHistory() });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/tree') {
+    const p = url.searchParams.get('path') || '';
+    if (DEMO) {
+      json(res, { path: p, tree: demoTree(p) });
+      return;
+    }
+    if (!p || !path.isAbsolute(p) || !allowedPath(p)) {
+      res.writeHead(403).end('not inside a session folder');
+      return;
+    }
+    json(res, { path: p, tree: buildTree(p) });
     return;
   }
 
@@ -215,7 +313,10 @@ server.on('error', (err) => {
 
 server.listen(PORT, HOST, () => {
   if (DEMO) startDemo();
-  else tailLog();
+  else {
+    for (const ev of readHistory(true)) noteRoots(ev);
+    tailLog();
+  }
   console.log(`\n  Neural Web is live → http://localhost:${PORT}`);
   console.log(DEMO ? '  mode: demo (synthetic activity)\n' : `  watching: ${LOG}\n`);
 });

@@ -16,6 +16,7 @@
     --write: #ff9f40;
     --search: #ffe066;
     --exec: #5dff9b;
+    --delete: #ff5470;
     --start: #ffffff;
   }
   * { box-sizing: border-box; }
@@ -23,13 +24,13 @@
     font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; cursor: grab; }
   canvas.dragging { cursor: grabbing; }
+  canvas.pointer { cursor: pointer; }
 
   .hud { position: fixed; top: 16px; left: 16px; display: flex; flex-direction: column; gap: 4px;
     pointer-events: none; text-shadow: 0 0 12px rgba(0,0,0,.8); }
   .brand { font-size: 18px; font-weight: 600; letter-spacing: .06em; display: flex; align-items: center; gap: 10px; }
   .status { width: 10px; height: 10px; border-radius: 50%; background: #ff5470; box-shadow: 0 0 10px #ff5470; }
-  .status.on { background: var(--exec); box-shadow: 0 0 10px var(--exec); animation: beat 2s infinite; }
-  @keyframes beat { 50% { opacity: .45; } }
+  .status.on { background: var(--exec); box-shadow: 0 0 10px var(--exec); }
   .stats { color: var(--muted); font-variant-numeric: tabular-nums; }
   .stats b { color: var(--text); font-weight: 600; }
   .mode { color: var(--search); font-size: 12px; }
@@ -38,12 +39,11 @@
   .where b { color: var(--text); font-weight: 600; }
 
   #panel { position: fixed; top: 16px; right: 16px; bottom: 16px; width: 320px; display: flex; flex-direction: column;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(10px);
-    transition: transform .25s ease; }
-  #panel.hidden { transform: translateX(calc(100% + 24px)); }
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(10px); }
+  #panel.hidden { display: none; }
   #toggle { position: fixed; top: 16px; right: 16px; z-index: 2; }
   #panel .controls { padding: 52px 14px 12px; display: grid; gap: 8px; border-bottom: 1px solid var(--line); }
-  .row { display: flex; gap: 8px; align-items: center; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   select, button, input[type=search] { font: inherit; color: var(--text); background: rgba(255,255,255,.05);
     border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
   select, input[type=search] { width: 100%; }
@@ -62,8 +62,7 @@
     padding: 2px 6px; border-radius: 6px; color: #05060f; background: var(--c); font-weight: 700; min-width: 50px; text-align: center; }
   #feed .p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
   #feed .t { color: var(--muted); font-size: 11px; }
-  #feed li.fresh { animation: flash 1.2s ease-out; }
-  @keyframes flash { from { background: rgba(120,140,255,.25); } }
+  #feed li.fresh { background: rgba(120,140,255,.14); }
   .empty { color: var(--muted); padding: 12px 14px; font-size: 12px; }
   .empty code { color: var(--text); }
 
@@ -91,15 +90,16 @@
 <button id="toggle" aria-controls="panel" aria-expanded="true">Panel</button>
 <aside id="panel">
   <div class="controls">
-    <select id="session" aria-label="Session filter"><option value="@live" id="opt-live">Current session</option><option value="">All sessions</option></select>
+    <select id="session" aria-label="Session filter"><option value="@live" id="opt-live">Live sessions</option><option value="">All sessions</option></select>
     <input type="search" id="search" placeholder="Highlight path…" aria-label="Highlight path">
     <div class="row">
-      <label><input type="checkbox" id="follow" checked> Follow</label>
+      <label><input type="checkbox" id="follow"> Follow</label>
       <label><input type="checkbox" id="labels"> All labels</label>
     </div>
     <div class="row">
       <button id="fit">Fit view</button>
-      <button id="pause">Pause</button>
+      <button id="expand">Expand all</button>
+      <button id="collapse">Collapse all</button>
       <button id="clear">Clear log</button>
     </div>
   </div>
@@ -109,6 +109,7 @@
     <span style="--c:var(--write)">write</span>
     <span style="--c:var(--search)">search</span>
     <span style="--c:var(--exec)">exec</span>
+    <span style="--c:var(--delete)">delete</span>
     <span style="--c:var(--start)">session start</span>
   </div>
   <h3>Live feed</h3>
@@ -116,20 +117,22 @@
 </aside>
 
 <div id="tip"></div>
-<div class="help">scroll to zoom · drag to pan · drag a neuron to move it · click to focus</div>
+<div class="help">scroll to zoom · drag to pan · click a folder to show / hide its contents · click a file to focus it</div>
 
 <script>
 (() => {
   'use strict';
 
   /* ================= config ================= */
-  const COLORS = { read: '#3ad6ff', edit: '#ff4fd8', write: '#ff9f40', search: '#ffe066', exec: '#5dff9b', start: '#ffffff' };
+  const COLORS = { read: '#3ad6ff', edit: '#ff4fd8', write: '#ff9f40', search: '#ffe066', exec: '#5dff9b', delete: '#ff5470', start: '#ffffff' };
   const IDLE = '#6f7cff';
   const GLOW_MS = 20000;     // how long a touched neuron keeps glowing
   const FEED_MAX = 250;
-  // in "Current session" mode, switch to another session that becomes active
-  // once the shown one has been quiet this long (a new session start switches at once)
-  const SWITCH_IDLE_MS = 2 * 60 * 1000;
+  // in "Live sessions" mode every open console is shown; one that never sent a
+  // SessionEnd (crashed, or hook not installed) counts as closed after this much quiet
+  const ACTIVE_MS = 2 * 60 * 60 * 1000;
+  // folders start expanded until about this many neurons are on screen; the rest start collapsed
+  const OPEN_BUDGET = 1200;
 
   /* ================= state ================= */
   const canvas = document.getElementById('web');
@@ -138,17 +141,19 @@
 
   let allEvents = [];
   const seen = new Set();
-  const sessions = new Map(); // id -> {first, last, root, count}
-  let liveMode = true;       // follow the session Claude is working in right now
-  let filterSession = '';
+  const sessions = new Map(); // id -> {first, last, root, count, ended, lastEv}
+  let mode = '@live';        // '@live' (all open sessions) | '' (all sessions) | a session id
+  let shownSet = new Set();  // sessions on the map; null = every session
   let highlight = '';
-  let paused = false;
 
-  let nodes = new Map();
-  let edges = [];
+  let nodes = new Map();     // key(path) -> neuron
+  let vis = [];              // neurons currently on screen
   let pulses = [];
   let rings = [];
-  let alpha = 1;            // simulation "temperature"
+
+  const trees = new Map();   // key(folder) -> directory listing from the server
+  const loading = new Set();
+  const userOpen = new Map(); // key(folder) -> collapsed? (what the user clicked; survives rebuilds)
 
   const cam = { x: 0, y: 0, k: 1 };
   const camGoal = { x: 0, y: 0, k: 1, active: false };
@@ -173,21 +178,31 @@
   /* ================= graph building ================= */
   function ensureNode(id, label, full, type, parent) {
     let n = nodes.get(id);
-    if (n) return n;
-    const a = Math.random() * Math.PI * 2;
-    const ox = parent ? parent.x : (Math.random() - 0.5) * 300;
-    const oy = parent ? parent.y : (Math.random() - 0.5) * 300;
-    const r = parent ? 25 + Math.random() * 20 : 0;
+    if (n) {
+      if (type !== 'file' && n.type === 'file') n.type = 'dir';
+      return n;
+    }
     n = {
-      id, label, full, type, parent,
-      x: ox + Math.cos(a) * r, y: oy + Math.sin(a) * r, vx: 0, vy: 0,
-      hits: 0, last: 0, color: IDLE, actions: {}, children: 0,
-      fixed: false, phase: Math.random() * Math.PI * 2,
+      id, label, full, type, parent, kids: [],
+      x: 0, y: 0, depth: 0, w: 1, shown: false,
+      hits: 0, last: 0, color: IDLE, actions: {},
+      collapsed: userOpen.has(id) ? userOpen.get(id) : undefined,
+      loaded: true,           // false = folder listed but its contents not fetched yet
     };
     nodes.set(id, n);
-    if (parent) { edges.push({ a: parent, b: n }); parent.children++; }
-    alpha = Math.max(alpha, 0.6);
+    if (parent) parent.kids.push(n);
     return n;
+  }
+
+  // merge a directory listing from /api/tree under neuron n
+  function mergeTree(n, t) {
+    if (!t.c) { n.loaded = false; return; }
+    n.loaded = true;
+    for (const c of t.c) {
+      const full = n.full + '/' + c.n;
+      const cn = ensureNode(key(full), c.n, full, c.d ? 'dir' : 'file', n);
+      if (c.d) mergeTree(cn, c);
+    }
   }
 
   function chainFor(ev) {
@@ -213,57 +228,198 @@
   }
 
   function applyEvent(ev, live) {
+    const before = nodes.size;
     const chain = chainFor(ev);
     const target = chain[chain.length - 1];
     const color = COLORS[ev.action] || IDLE;
     target.hits++;
     target.actions[ev.action] = (target.actions[ev.action] || 0) + 1;
-    target.color = color;
-    for (const n of chain) { n.last = Math.max(n.last, ev.ts); if (n !== target && n.type !== 'file') n.color = n.color === IDLE ? color : n.color; }
+    target.deleted = ev.action === 'delete';
+    // the whole path lights up, so a collapsed folder still shows activity inside it
+    for (const n of chain) { n.last = Math.max(n.last, ev.ts); n.color = color; }
     if (live) {
-      pulses.push({ chain, color, t0: performance.now() });
-      if ($('follow').checked) focusOn(target, Math.max(cam.k, 1));
+      if (nodes.size !== before) relayout();
+      const shownChain = chain.filter((n) => n.shown);
+      pulses.push({ chain: shownChain, color, t0: performance.now() });
+      if ($('follow').checked) focusOn(shownChain[shownChain.length - 1], Math.max(cam.k, 1));
     }
     return target;
   }
 
+  // folders of the sessions on screen; their full listing is fetched from the server
+  function shownRoots() {
+    const out = new Map();
+    for (const [id, s] of sessions) if (isShown(id) && s.root) out.set(key(norm(s.root)), norm(s.root));
+    return [...out.values()];
+  }
+
   function rebuild() {
-    nodes = new Map(); edges = []; pulses = []; rings = [];
+    nodes = new Map(); pulses = []; rings = [];
     $('feed').innerHTML = '';
+    for (const r of shownRoots()) {
+      const rn = ensureNode(key(r), base(r), r, 'root', null);
+      const t = trees.get(key(r));
+      if (t) mergeTree(rn, t); else loadTree(r, true);
+    }
+    // folders the user opened later (their contents were fetched separately)
+    for (const [k, t] of [...trees].sort((a, b) => a[0].length - b[0].length)) {
+      const n = nodes.get(k);
+      if (n && n.parent) mergeTree(n, t);
+    }
     const list = visibleEvents();
     for (const ev of list) applyEvent(ev, false);
     for (const ev of list.slice(-FEED_MAX)) addFeed(ev, false);
-    alpha = 1;
+    relayout();
     updateStats();
     updateWhere();
-    // let the layout settle a bit before framing it
-    for (let i = 0; i < 120; i++) step();
     fit(true);
     renderEmpty();
   }
 
-  const visibleEvents = () => (filterSession ? allEvents.filter((e) => e.session === filterSession) : allEvents);
+  function loadTree(full, isRoot) {
+    const k = key(full);
+    if (loading.has(k)) return;
+    loading.add(k);
+    fetch('/api/tree?path=' + encodeURIComponent(full))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        loading.delete(k);
+        if (!data) {
+          // not listable (outside the session folders): show what Claude touched in it
+          const n = nodes.get(k);
+          if (n) { n.loaded = true; if (!isRoot) n.collapsed = false; relayout(); }
+          return;
+        }
+        trees.set(k, data.tree);
+        if (isRoot) { rebuild(); return; }
+        const n = nodes.get(k);
+        if (!n) return;
+        mergeTree(n, data.tree);
+        n.collapsed = false;
+        relayout();
+        updateStats();
+      })
+      .catch(() => loading.delete(k));
+  }
+
+  /* ================= expand / collapse ================= */
+  function setCollapsed(n, c) { n.collapsed = c; userOpen.set(n.id, c); }
+
+  function toggle(n) {
+    if (n.type === 'file') return;
+    if (n.collapsed && !n.loaded) {
+      userOpen.set(n.id, false);
+      loadTree(n.full, false);
+      return;
+    }
+    setCollapsed(n, !n.collapsed);
+    relayout();
+  }
+
+  function revealPath(n) {
+    for (let p = n.parent; p; p = p.parent) if (p.collapsed) setCollapsed(p, false);
+    relayout();
+  }
+
+  // folders the user never clicked: open them breadth-first while there is room
+  function applyDefaults() {
+    let count = 0;
+    const roots = [...nodes.values()].filter((n) => !n.parent);
+    const queue = [...roots];
+    count += roots.length;
+    while (queue.length) {
+      const n = queue.shift();
+      if (n.type === 'file') continue;
+      if (n.collapsed === undefined) {
+        n.collapsed = !n.loaded || (n.parent && count + n.kids.length > OPEN_BUDGET);
+      }
+      if (!n.collapsed) { count += n.kids.length; queue.push(...n.kids); }
+    }
+  }
+
+  /* ================= layout (static radial tree) ================= */
+  const byName = (a, b) => ((a.type === 'file') - (b.type === 'file')) || a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: 'base' });
+
+  function measure(n, depth) {
+    n.depth = depth;
+    n.shown = true;
+    vis.push(n);
+    let maxD = depth;
+    if (!n.collapsed && n.kids.length) {
+      n.kids.sort(byName);
+      n.w = 0;
+      for (const c of n.kids) { maxD = Math.max(maxD, measure(c, depth + 1)); n.w += c.w; }
+    } else n.w = 1;
+    return maxD;
+  }
+
+  function place(n, cx, cy, step, a0, a1) {
+    const a = (a0 + a1) / 2, r = n.depth * step;
+    n.x = cx + Math.cos(a) * r;
+    n.y = cy + Math.sin(a) * r;
+    if (n.collapsed || !n.kids.length) return;
+    let s = a0;
+    for (const c of n.kids) {
+      const span = ((a1 - a0) * c.w) / n.w;
+      place(c, cx, cy, step, s, s + span);
+      s += span;
+    }
+  }
+
+  function relayout() {
+    applyDefaults();
+    for (const n of nodes.values()) n.shown = false;
+    vis = [];
+    let cursor = 0;
+    for (const r of [...nodes.values()].filter((n) => !n.parent)) {
+      const depth = measure(r, 0);
+      // ring spacing: enough room on the outer ring for every leaf
+      const step = Math.max(80, (r.w * 15) / (2 * Math.PI * Math.max(1, depth)));
+      const R = Math.max(60, step * depth);
+      const cx = cursor + R;
+      place(r, cx, 0, step, -Math.PI / 2, Math.PI * 1.5);
+      cursor = cx + R + 160;
+    }
+    // keep the whole picture centred on the origin
+    const shift = cursor > 0 ? (cursor - 160) / 2 : 0;
+    for (const n of vis) n.x -= shift;
+    updateStats();
+  }
+
+  /* ================= sessions ================= */
+  const isShown = (id) => !shownSet || shownSet.has(id);
+  const visibleEvents = () => allEvents.filter((e) => e.action !== 'end' && isShown(e.session));
+
+  // every session that is still open (no SessionEnd, not idle for ACTIVE_MS);
+  // if none is, the most recent one so the map never goes blank
+  function liveSessions() {
+    const now = Date.now(), out = new Set();
+    for (const [id, s] of sessions) if (!s.ended && now - s.last < ACTIVE_MS) out.add(id);
+    if (!out.size) { const l = latestSession(); if (l) out.add(l); }
+    return out;
+  }
+  const computeShown = () => (mode === '@live' ? liveSessions() : mode ? new Set([mode]) : null);
+  const sameSet = (a, b) => a && b && a.size === b.size && [...a].every((x) => b.has(x));
+
+  // live mode: a console opened or closed -> redraw with the new set of sessions
+  function refreshLive() {
+    if (mode !== '@live') return false;
+    const next = liveSessions();
+    if (sameSet(next, shownSet)) return false;
+    shownSet = next;
+    updateLiveLabel();
+    rebuild();
+    return true;
+  }
 
   function ingest(ev, live) {
     if (!ev || !ev.path || seen.has(ev.id)) return;
     seen.add(ev.id);
     allEvents.push(ev);
-    const prev = sessions.get(ev.session);
-    const prevShown = sessions.get(filterSession);
-    const shownLast = prevShown ? prevShown.last : 0;
     trackSession(ev);
     if (!live) return;
-    if (liveMode && ev.session !== filterSession &&
-        (ev.action === 'start' || !prevShown || ev.ts - shownLast > SWITCH_IDLE_MS || !prev && !filterSession)) {
-      // Claude is now working in another session: show that one instead
-      filterSession = ev.session;
-      updateLiveLabel();
-      rebuild();
-      const target = chainFor(ev).pop();
-      rings.push({ n: target, color: COLORS[ev.action] || IDLE, t0: performance.now() });
-      return;
-    }
-    if (filterSession && ev.session !== filterSession) return;
+    if (refreshLive()) return;
+    if (ev.action === 'end' || !isShown(ev.session)) return;
     applyEvent(ev, true);
     addFeed(ev, true);
     updateStats();
@@ -280,18 +436,17 @@
   const sessionName = (s) => `${base(norm(s.root)) || '?'} · ${new Date(s.first).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
 
   function updateLiveLabel() {
-    const s = sessions.get(filterSession);
-    $('opt-live').textContent = s && liveMode ? `Current session — ${sessionName(s)}` : 'Current session';
+    const ids = mode === '@live' && shownSet ? [...shownSet].filter((id) => sessions.has(id)) : [];
+    $('opt-live').textContent = ids.length
+      ? `Live sessions (${ids.length}) — ${ids.map((id) => base(norm(sessions.get(id).root))).join(', ')}`
+      : 'Live sessions';
   }
 
-  // HUD: where the shown session was opened, and where Claude is working now
+  // HUD: where the shown sessions were opened, and where Claude is working now
   function updateWhere() {
     const el = $('where');
     el.innerHTML = '';
-    const s = filterSession && sessions.get(filterSession);
-    if (!s) return;
-    const list = visibleEvents();
-    const lastEv = list[list.length - 1];
+    const ids = (shownSet ? [...shownSet] : []).filter((id) => sessions.has(id));
     const line = (label, value) => {
       const d = document.createElement('div');
       const b = document.createElement('b');
@@ -300,11 +455,16 @@
       d.title = value;
       el.appendChild(d);
     };
-    line('opened in', norm(s.root));
-    if (lastEv && lastEv.action !== 'start') {
-      const p = norm(lastEv.path);
-      const dir = lastEv.kind === 'dir' ? p : p.slice(0, p.lastIndexOf('/')) || p;
-      line('working in', dir);
+    const dirOf = (ev) => { const p = norm(ev.path); return ev.kind === 'dir' ? p : p.slice(0, p.lastIndexOf('/')) || p; };
+    if (ids.length === 1) {
+      const s = sessions.get(ids[0]);
+      line('opened in', norm(s.root));
+      if (s.lastEv) line('working in', dirOf(s.lastEv));
+      return;
+    }
+    for (const id of ids.slice(0, 6)) {
+      const s = sessions.get(id);
+      line(base(norm(s.root)) + ' →', s.lastEv ? dirOf(s.lastEv) : norm(s.root));
     }
   }
 
@@ -318,6 +478,9 @@
       opt.id = 'opt-' + ev.session;
       $('session').appendChild(opt);
     }
+    s.ended = ev.action === 'end';
+    if (ev.action === 'end') return;
+    if (ev.action !== 'start') s.lastEv = ev;
     s.count++;
     s.last = Math.max(s.last, ev.ts);
     const opt = document.getElementById('opt-' + ev.session);
@@ -326,9 +489,11 @@
 
   function resetAll() {
     allEvents = []; seen.clear(); sessions.clear();
-    $('session').innerHTML = '<option value="@live" id="opt-live">Current session</option><option value="">All sessions</option>';
-    $('session').value = liveMode ? '@live' : '';
-    filterSession = '';
+    $('session').innerHTML = '<option value="@live" id="opt-live">Live sessions</option><option value="">All sessions</option>';
+    if (mode !== '@live') mode = '';
+    $('session').value = mode;
+    shownSet = computeShown();
+    updateLiveLabel();
     rebuild();
   }
 
@@ -336,7 +501,7 @@
   function addFeed(ev, fresh) {
     const li = document.createElement('li');
     li.style.setProperty('--c', COLORS[ev.action] || IDLE);
-    if (fresh) li.className = 'fresh';
+    if (fresh) { li.className = 'fresh'; setTimeout(() => li.classList.remove('fresh'), 1500); }
     const badge = document.createElement('span');
     badge.className = 'badge'; badge.textContent = ev.action;
     const p = document.createElement('span');
@@ -346,6 +511,7 @@
     li.append(badge, p, t);
     li.addEventListener('click', () => {
       const n = nodes.get(key(norm(ev.path))) || chainFor(ev).pop();
+      revealPath(n);
       $('follow').checked = false;
       focusOn(n, Math.max(cam.k, 1.6));
       rings.push({ n, color: COLORS[ev.action], t0: performance.now() });
@@ -374,72 +540,30 @@
     }
   }
 
-  /* ================= physics ================= */
-  function step() {
-    const arr = [...nodes.values()];
-    const n = arr.length;
-    const a = Math.max(alpha, 0.02);
-    // repulsion (n^2, fine for a few hundred neurons)
-    for (let i = 0; i < n; i++) {
-      const p = arr[i];
-      for (let j = i + 1; j < n; j++) {
-        const q = arr[j];
-        let dx = p.x - q.x, dy = p.y - q.y;
-        let d2 = dx * dx + dy * dy;
-        if (d2 > 160000) continue;
-        if (d2 < 1) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d2 = 1; }
-        const f = (1400 / d2) * a;
-        p.vx += dx * f; p.vy += dy * f;
-        q.vx -= dx * f; q.vy -= dy * f;
-      }
-    }
-    // synapse springs
-    for (const e of edges) {
-      const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y;
-      const d = Math.sqrt(dx * dx + dy * dy) || 1;
-      const rest = e.b.type === 'file' ? 42 : 70;
-      const f = ((d - rest) / d) * 0.06 * a;
-      e.b.vx -= dx * f; e.b.vy -= dy * f;
-      e.a.vx += dx * f * 0.5; e.a.vy += dy * f * 0.5;
-    }
-    // gravity + integrate
-    for (const p of arr) {
-      const g = p.type === 'root' ? 0.004 : 0.0012;
-      p.vx -= p.x * g * a; p.vy -= p.y * g * a;
-      if (p.fixed) { p.vx = p.vy = 0; continue; }
-      p.vx *= 0.82; p.vy *= 0.82;
-      p.x += Math.max(-30, Math.min(30, p.vx));
-      p.y += Math.max(-30, Math.min(30, p.vy));
-    }
-    alpha *= 0.992;
-  }
-
   /* ================= camera ================= */
-  const toScreen = (x, y) => [(x - cam.x) * cam.k + W / 2, (y - cam.y) * cam.k + H / 2];
   const toWorld = (sx, sy) => [(sx - W / 2) / cam.k + cam.x, (sy - H / 2) / cam.k + cam.y];
+  const panelOpen = () => !$('panel').classList.contains('hidden');
+  const panelShift = (k) => (panelOpen() && W > 640 ? 180 / k : 0);
 
   function focusOn(n, k) {
     if (!n) return;
-    Object.assign(camGoal, { x: n.x + (panelOpen() ? 150 / k : 0), y: n.y, k, active: true, node: n });
+    Object.assign(camGoal, { x: n.x + panelShift(k), y: n.y, k, active: true });
   }
 
   function fit(instant) {
-    if (!nodes.size) { Object.assign(camGoal, { x: 0, y: 0, k: 1, active: true, node: null }); return; }
+    if (!vis.length) { Object.assign(camGoal, { x: 0, y: 0, k: 1, active: true }); return; }
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const n of nodes.values()) { x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y); x1 = Math.max(x1, n.x); y1 = Math.max(y1, n.y); }
+    for (const n of vis) { x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y); x1 = Math.max(x1, n.x); y1 = Math.max(y1, n.y); }
     const usableW = W - (panelOpen() && W > 640 ? 360 : 0) - 80;
-    const k = Math.max(0.15, Math.min(2.2, usableW / (x1 - x0 + 80), (H - 120) / (y1 - y0 + 80)));
-    const cx = (x0 + x1) / 2 + (panelOpen() && W > 640 ? 180 / k : 0);
-    Object.assign(camGoal, { x: cx, y: (y0 + y1) / 2, k, active: true, node: null });
+    const k = Math.max(0.05, Math.min(2.2, usableW / (x1 - x0 + 80), (H - 120) / (y1 - y0 + 80)));
+    Object.assign(camGoal, { x: (x0 + x1) / 2 + panelShift(k), y: (y0 + y1) / 2, k, active: true });
     if (instant) Object.assign(cam, { x: camGoal.x, y: camGoal.y, k: camGoal.k });
   }
-
-  const panelOpen = () => !$('panel').classList.contains('hidden');
 
   /* ================= rendering ================= */
   function radius(n) {
     if (n.type === 'root') return 11;
-    if (n.type === 'dir') return Math.min(10, 4.5 + Math.sqrt(n.children) * 1.2);
+    if (n.type === 'dir') return Math.min(10, 4.5 + Math.sqrt(n.kids.length) * 0.8);
     return Math.min(9, 3 + Math.sqrt(n.hits) * 1.1);
   }
 
@@ -448,7 +572,13 @@
     return `rgba(${v >> 16},${(v >> 8) & 255},${v & 255},${a})`;
   }
 
-  function matches(n) { return highlight && n.full.toLowerCase().includes(highlight); }
+  const matches = (n) => highlight && n.full.toLowerCase().includes(highlight);
+
+  // edges bend slightly so the web reads as dendrites rather than spokes
+  function ctrl(a, b) {
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    return [mx - (b.y - a.y) * 0.12, my + (b.x - a.x) * 0.12];
+  }
 
   function draw(now) {
     const wall = Date.now();
@@ -462,31 +592,32 @@
 
     // synapses
     ctx.globalCompositeOperation = 'lighter';
-    for (const e of edges) {
-      const glow = Math.exp(-(wall - e.b.last) / GLOW_MS);
-      const hl = matches(e.b);
-      ctx.strokeStyle = hl ? 'rgba(255,255,255,.6)' : rgba(glow > 0.05 ? e.b.color : IDLE, 0.12 + glow * 0.55);
+    for (const n of vis) {
+      if (!n.parent) continue;
+      const glow = Math.exp(-(wall - n.last) / GLOW_MS);
+      ctx.strokeStyle = matches(n) ? 'rgba(255,255,255,.6)' : rgba(glow > 0.05 ? n.color : IDLE, 0.12 + glow * 0.55);
       ctx.lineWidth = (0.8 + glow * 1.6) / Math.sqrt(k);
-      const mx = (e.a.x + e.b.x) / 2, my = (e.a.y + e.b.y) / 2;
-      const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y;
+      const [cx, cy] = ctrl(n.parent, n);
       ctx.beginPath();
-      ctx.moveTo(e.a.x, e.a.y);
-      ctx.quadraticCurveTo(mx - dy * 0.15, my + dx * 0.15, e.b.x, e.b.y);
+      ctx.moveTo(n.parent.x, n.parent.y);
+      ctx.quadraticCurveTo(cx, cy, n.x, n.y);
       ctx.stroke();
     }
 
     // action potentials travelling down the dendrites
     pulses = pulses.filter((p) => {
       const segs = p.chain.length - 1;
+      if (segs < 0) return false;
       const dur = 160 * Math.max(segs, 1);
-      const t = (now - p.t0) / dur;
+      // the frame timestamp can be a little older than t0 (set in an event handler)
+      const t = Math.max(0, (now - p.t0) / dur);
       if (t >= 1) { rings.push({ n: p.chain[segs], color: p.color, t0: now }); return false; }
       let x, y;
       if (segs === 0) { x = p.chain[0].x; y = p.chain[0].y; }
       else {
         const f = t * segs, i = Math.floor(f), u = f - i;
         const a = p.chain[i], b = p.chain[i + 1];
-        const mx = (a.x + b.x) / 2 - (b.y - a.y) * 0.15, my = (a.y + b.y) / 2 + (b.x - a.x) * 0.15;
+        const [mx, my] = ctrl(a, b);
         x = (1 - u) * (1 - u) * a.x + 2 * (1 - u) * u * mx + u * u * b.x;
         y = (1 - u) * (1 - u) * a.y + 2 * (1 - u) * u * my + u * u * b.y;
       }
@@ -498,8 +629,8 @@
 
     // firing rings
     rings = rings.filter((r) => {
-      const t = (now - r.t0) / 900;
-      if (t >= 1) return false;
+      const t = Math.max(0, (now - r.t0) / 900);
+      if (t >= 1 || !r.n.shown) return false;
       ctx.strokeStyle = rgba(r.color, (1 - t) * 0.9);
       ctx.lineWidth = 2 / k;
       ctx.beginPath(); ctx.arc(r.n.x, r.n.y, radius(r.n) + t * 28, 0, Math.PI * 2); ctx.stroke();
@@ -507,21 +638,35 @@
     });
 
     // neurons
-    for (const n of nodes.values()) {
+    for (const n of vis) {
       const glow = Math.exp(-(wall - n.last) / GLOW_MS);
-      const r = radius(n) * (1 + 0.06 * Math.sin(now / 700 + n.phase));
+      const r = radius(n);
       const c = glow > 0.02 ? n.color : IDLE;
-      const halo = r * (2.2 + glow * 3);
-      const g = ctx.createRadialGradient(n.x, n.y, r * 0.3, n.x, n.y, halo);
-      g.addColorStop(0, rgba(c, 0.25 + glow * 0.5)); g.addColorStop(1, rgba(c, 0));
-      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(n.x, n.y, halo, 0, Math.PI * 2); ctx.fill();
-
-      ctx.fillStyle = rgba(c, n.type === 'file' ? 0.55 + glow * 0.45 : 0.25 + glow * 0.4);
+      if (glow > 0.02 || n.type !== 'file') {
+        const halo = r * (2.2 + glow * 3);
+        const g = ctx.createRadialGradient(n.x, n.y, r * 0.3, n.x, n.y, halo);
+        g.addColorStop(0, rgba(c, 0.25 + glow * 0.5)); g.addColorStop(1, rgba(c, 0));
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(n.x, n.y, halo, 0, Math.PI * 2); ctx.fill();
+      }
+      // files Claude never touched are dimmer than the ones it did
+      const fileA = n.hits ? 0.55 + glow * 0.45 : 0.3;
+      ctx.fillStyle = rgba(c, n.type === 'file' ? fileA : 0.25 + glow * 0.4);
       ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2); ctx.fill();
       if (n.type !== 'file') {
         ctx.strokeStyle = rgba(c, 0.7 + glow * 0.3); ctx.lineWidth = 1.4 / Math.sqrt(k); ctx.stroke();
         ctx.fillStyle = rgba('#ffffff', 0.6 + glow * 0.4);
         ctx.beginPath(); ctx.arc(n.x, n.y, r * 0.35, 0, Math.PI * 2); ctx.fill();
+        if (n.collapsed) {
+          // dashed outer ring = folder with hidden contents
+          ctx.setLineDash([3 / k, 3 / k]);
+          ctx.strokeStyle = rgba(c, 0.8); ctx.lineWidth = 1.2 / k;
+          ctx.beginPath(); ctx.arc(n.x, n.y, r + 4 / k + 2, 0, Math.PI * 2); ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+      if (n.deleted) {
+        ctx.strokeStyle = rgba(COLORS.delete, 0.9); ctx.lineWidth = 1.5 / k;
+        ctx.beginPath(); ctx.moveTo(n.x - r, n.y - r); ctx.lineTo(n.x + r, n.y + r); ctx.stroke();
       }
       if (matches(n)) {
         ctx.strokeStyle = 'rgba(255,255,255,.9)'; ctx.lineWidth = 2 / k;
@@ -533,34 +678,41 @@
     ctx.globalCompositeOperation = 'source-over';
     const allLabels = $('labels').checked;
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    for (const n of nodes.values()) {
+    for (const n of vis) {
       const glow = Math.exp(-(wall - n.last) / GLOW_MS);
       const show = n.type === 'root' || n === hover || matches(n) || allLabels || glow > 0.25 ||
-        (n.type === 'dir' && k > 0.7) || (n.type === 'file' && k > 1.4);
+        (n.type === 'dir' && k > 0.6) || (n.type === 'file' && k > 1.3);
       if (!show) continue;
       const size = (n.type === 'root' ? 13 : 11) / k;
       ctx.font = `${n.type === 'file' ? 400 : 600} ${size}px ui-sans-serif, system-ui, sans-serif`;
-      ctx.fillStyle = n.type === 'root' ? '#ffffff' : rgba('#d9defa', 0.55 + glow * 0.45);
+      ctx.fillStyle = n.type === 'root' ? '#ffffff' : rgba('#d9defa', (n.type === 'file' && !n.hits ? 0.45 : 0.6) + glow * 0.4);
       ctx.shadowColor = 'rgba(0,0,0,.9)'; ctx.shadowBlur = 4;
-      ctx.fillText(n.label, n.x, n.y + radius(n) + 4 / k);
+      const label = n.collapsed && n.type !== 'file' ? `${n.label} (${n.loaded ? n.kids.length : '…'})` : n.label;
+      ctx.fillText(label, n.x, n.y + radius(n) + 4 / k);
       ctx.shadowBlur = 0;
     }
   }
 
   function frame(now) {
-    if (!paused) step();
-    if (camGoal.active) {
-      if (camGoal.node) {
-        camGoal.x = camGoal.node.x + (panelOpen() && W > 640 ? 150 / camGoal.k : 0);
-        camGoal.y = camGoal.node.y;
-      }
-      cam.x += (camGoal.x - cam.x) * 0.08;
-      cam.y += (camGoal.y - cam.y) * 0.08;
-      cam.k += (camGoal.k - cam.k) * 0.08;
-      if (Math.abs(camGoal.x - cam.x) + Math.abs(camGoal.y - cam.y) < 0.5 && Math.abs(camGoal.k - cam.k) < 0.002) camGoal.active = false;
-    }
-    draw(now);
+    // schedule the next frame first: an error while drawing must never freeze the map
     requestAnimationFrame(frame);
+    if (camGoal.active) {
+      cam.x += (camGoal.x - cam.x) * 0.15;
+      cam.y += (camGoal.y - cam.y) * 0.15;
+      cam.k += (camGoal.k - cam.k) * 0.15;
+      if (Math.abs(camGoal.x - cam.x) + Math.abs(camGoal.y - cam.y) < 0.5 && Math.abs(camGoal.k - cam.k) < 0.002) {
+        Object.assign(cam, { x: camGoal.x, y: camGoal.y, k: camGoal.k });
+        camGoal.active = false;
+      }
+    }
+    try {
+      draw(now);
+    } catch (err) {
+      console.error('[neural-web] draw error', err);
+      pulses = []; rings = []; // drop the animation that failed
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.setLineDash([]);
+    }
   }
 
   function resize() {
@@ -570,12 +722,12 @@
   }
 
   /* ================= interaction ================= */
-  let hover = null, drag = null, panStart = null, moved = false;
+  let hover = null, panStart = null, moved = false;
 
   function nodeAt(sx, sy) {
     const [x, y] = toWorld(sx, sy);
     let best = null, bestD = Infinity;
-    for (const n of nodes.values()) {
+    for (const n of vis) {
       const d = Math.hypot(n.x - x, n.y - y);
       const hit = radius(n) + 6 / cam.k;
       if (d < hit && d < bestD) { best = n; bestD = d; }
@@ -586,37 +738,39 @@
   canvas.addEventListener('pointerdown', (e) => {
     canvas.setPointerCapture(e.pointerId);
     moved = false;
-    const n = nodeAt(e.clientX, e.clientY);
-    if (n) { drag = n; n.fixed = true; }
-    else panStart = { sx: e.clientX, sy: e.clientY, x: cam.x, y: cam.y };
-    canvas.classList.add('dragging');
+    panStart = { sx: e.clientX, sy: e.clientY, x: cam.x, y: cam.y };
   });
 
   canvas.addEventListener('pointermove', (e) => {
-    if (drag) {
-      const [x, y] = toWorld(e.clientX, e.clientY);
-      drag.x = x; drag.y = y; moved = true; alpha = Math.max(alpha, 0.3);
-    } else if (panStart) {
+    if (panStart) {
       const dx = e.clientX - panStart.sx, dy = e.clientY - panStart.sy;
-      if (Math.abs(dx) + Math.abs(dy) > 3) { moved = true; camGoal.active = false; $('follow').checked = false; }
-      cam.x = panStart.x - dx / cam.k; cam.y = panStart.y - dy / cam.k;
+      if (Math.abs(dx) + Math.abs(dy) > 3) {
+        moved = true; camGoal.active = false; $('follow').checked = false;
+        canvas.classList.add('dragging');
+      }
+      if (moved) { cam.x = panStart.x - dx / cam.k; cam.y = panStart.y - dy / cam.k; }
     }
     hover = nodeAt(e.clientX, e.clientY);
+    canvas.classList.toggle('pointer', !!hover && !panStart);
     showTip(hover, e.clientX, e.clientY);
   });
 
-  const endDrag = () => {
-    if (drag) { drag.fixed = false; if (!moved) { focusOn(drag, Math.max(cam.k, 1.6)); $('follow').checked = false; } }
-    drag = null; panStart = null; canvas.classList.remove('dragging');
+  const endPan = (e) => {
+    if (panStart && !moved && e.type === 'pointerup') {
+      const n = nodeAt(e.clientX, e.clientY);
+      if (n && n.type !== 'file') toggle(n);
+      else if (n) { $('follow').checked = false; focusOn(n, Math.max(cam.k, 1.6)); rings.push({ n, color: n.color, t0: performance.now() }); }
+    }
+    panStart = null; canvas.classList.remove('dragging');
   };
-  canvas.addEventListener('pointerup', endDrag);
-  canvas.addEventListener('pointercancel', endDrag);
+  canvas.addEventListener('pointerup', endPan);
+  canvas.addEventListener('pointercancel', endPan);
   canvas.addEventListener('pointerleave', () => { hover = null; $('tip').style.display = 'none'; });
 
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
     const [wx, wy] = toWorld(e.clientX, e.clientY);
-    cam.k = Math.max(0.08, Math.min(6, cam.k * Math.exp(-e.deltaY * 0.0015)));
+    cam.k = Math.max(0.03, Math.min(6, cam.k * Math.exp(-e.deltaY * 0.0015)));
     cam.x = wx - (e.clientX - W / 2) / cam.k;
     cam.y = wy - (e.clientY - H / 2) / cam.k;
     camGoal.active = false;
@@ -642,20 +796,33 @@
     const meta = document.createElement('div');
     meta.innerHTML = `<span class="k">${n.type}</span>` +
       (n.hits ? ` · ${n.hits} touch${n.hits > 1 ? 'es' : ''}` : '') +
-      (n.children ? ` · ${n.children} child${n.children > 1 ? 'ren' : ''}` : '') +
+      (n.kids.length ? ` · ${n.kids.length} item${n.kids.length > 1 ? 's' : ''}` : '') +
       (n.last ? ` · <span class="k">${ago(n.last)}</span>` : '');
     tip.appendChild(meta);
     if (acts) { const d = document.createElement('div'); d.innerHTML = acts; tip.appendChild(d); }
+    if (n.type !== 'file') {
+      const d = document.createElement('div');
+      d.className = 'k';
+      d.textContent = n.collapsed ? 'click to show contents' : 'click to hide contents';
+      tip.appendChild(d);
+    }
     tip.style.display = 'block';
     const tx = Math.min(x + 14, W - tip.offsetWidth - 8), ty = Math.min(y + 14, H - tip.offsetHeight - 8);
     tip.style.left = tx + 'px'; tip.style.top = ty + 'px';
   }
 
   $('fit').addEventListener('click', () => { $('follow').checked = false; fit(false); });
-  $('pause').addEventListener('click', (e) => { paused = !paused; e.target.textContent = paused ? 'Resume' : 'Pause'; });
+  $('expand').addEventListener('click', () => {
+    for (const n of nodes.values()) if (n.type !== 'file' && n.loaded) setCollapsed(n, false);
+    relayout(); fit(false);
+  });
+  $('collapse').addEventListener('click', () => {
+    for (const n of nodes.values()) if (n.type !== 'file') setCollapsed(n, !!n.parent);
+    relayout(); fit(false);
+  });
   $('session').addEventListener('change', (e) => {
-    liveMode = e.target.value === '@live';
-    filterSession = liveMode ? latestSession() : e.target.value;
+    mode = e.target.value;
+    shownSet = computeShown();
     updateLiveLabel();
     rebuild();
   });
@@ -673,7 +840,6 @@
   window.addEventListener('keydown', (e) => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
     if (e.key === 'f') fit(false);
-    if (e.key === ' ') { e.preventDefault(); $('pause').click(); }
   });
 
   /* ================= data ================= */
@@ -694,7 +860,7 @@
     fetch('/api/history').then((r) => r.json()).then((data) => {
       if (data.demo) $('mode').textContent = 'demo mode — synthetic activity';
       for (const ev of data.events) ingest(ev, false);
-      if (liveMode) filterSession = latestSession();
+      shownSet = computeShown();
       updateLiveLabel();
       rebuild();
       ready = true;
@@ -702,6 +868,9 @@
       buffer = [];
     }).catch(() => { ready = true; });
   }
+
+  // drop consoles that went quiet without a SessionEnd
+  setInterval(refreshLive, 30000);
 
   resize();
   renderEmpty();
