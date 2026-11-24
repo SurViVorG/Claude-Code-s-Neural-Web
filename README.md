@@ -82,9 +82,11 @@ If the file already has a `"hooks"` section, add the `SessionStart` and `PostToo
 entries to it instead of replacing it. Restart Claude Code (or run `/hooks` to check it was
 picked up).
 
-The two hooks do different jobs:
+The hooks do different jobs:
 
 - **`PostToolUse`** records every file Claude touches. This one is required.
+- **`SessionStart` → `log-activity.js`** records the folder each session was opened in, so it
+  becomes that session's root neuron straight away, before Claude touches anything.
 - **`SessionStart`** (optional) opens the Neural Web automatically: when a Claude Code
   session starts and the server is not running yet, it starts the server in the background
   and opens <http://localhost:4747> in your browser. If the server is already running it
@@ -129,6 +131,7 @@ Colours show the last action on each neuron:
 | 🟠 orange | write | `Write` (create / overwrite) |
 | 🟡 yellow | search | `Glob`, `Grep` (on the searched directory) |
 | 🟢 green | exec | `Bash`, `PowerShell` (on the working directory) |
+| ⚪ white | session start | the folder Claude Code was opened in |
 
 Files outside the project root (for example `~/.claude/...`) appear as their own small
 clusters, rooted at their parent directory.
@@ -147,11 +150,15 @@ clusters, rooted at their parent directory.
 | Follow Claude | **Follow** checkbox — the camera glides to each new touch (turns off when you pan) |
 | Show every label | **All labels** checkbox |
 | Highlight paths | Type in **Highlight path…** (matches any part of the full path) |
+| Current session | **Current session** (default) shows only the session Claude is working in now, and switches by itself when a new session starts in another folder (or the shown one has been idle for 2 minutes) |
 | One session only | Session dropdown (project · start time · number of signals) |
+| All sessions | **All sessions** in the dropdown |
 | Panel | **Panel** button hides/shows the side panel |
 | Start fresh | **Clear log** — empties the activity log file |
 
-The status dot next to the title is green while the browser is connected to the server.
+The status dot next to the title is green while the browser is connected to the server. Under the
+title, **opened in** shows the folder the shown session started in and **working in** the folder of
+Claude's latest touch.
 
 ## Configuration
 

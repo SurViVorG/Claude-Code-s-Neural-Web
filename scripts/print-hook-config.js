@@ -16,6 +16,10 @@ const config = {
         matcher: 'startup',
         hooks: [{ type: 'command', command: `node "${autostart}"` }],
       },
+      {
+        // records where each session was opened (startup, resume, /clear)
+        hooks: [{ type: 'command', command: `node "${hook}"` }],
+      },
     ],
     PostToolUse: [
       {

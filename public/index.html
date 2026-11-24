@@ -16,6 +16,7 @@
     --write: #ff9f40;
     --search: #ffe066;
     --exec: #5dff9b;
+    --start: #ffffff;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
@@ -32,6 +33,9 @@
   .stats { color: var(--muted); font-variant-numeric: tabular-nums; }
   .stats b { color: var(--text); font-weight: 600; }
   .mode { color: var(--search); font-size: 12px; }
+  .where { color: var(--muted); font-size: 12px; max-width: min(560px, calc(100vw - 32px)); display: grid; gap: 2px; }
+  .where div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .where b { color: var(--text); font-weight: 600; }
 
   #panel { position: fixed; top: 16px; right: 16px; bottom: 16px; width: 320px; display: flex; flex-direction: column;
     background: var(--panel); border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(10px);
@@ -81,12 +85,13 @@
   <div class="brand"><span class="status" id="status" title="disconnected"></span>NEURAL WEB</div>
   <div class="stats"><b id="sFiles">0</b> files · <b id="sDirs">0</b> dirs · <b id="sEvents">0</b> signals</div>
   <div class="mode" id="mode"></div>
+  <div class="where" id="where"></div>
 </div>
 
 <button id="toggle" aria-controls="panel" aria-expanded="true">Panel</button>
 <aside id="panel">
   <div class="controls">
-    <select id="session" aria-label="Session filter"><option value="">All sessions</option></select>
+    <select id="session" aria-label="Session filter"><option value="@live" id="opt-live">Current session</option><option value="">All sessions</option></select>
     <input type="search" id="search" placeholder="Highlight path…" aria-label="Highlight path">
     <div class="row">
       <label><input type="checkbox" id="follow" checked> Follow</label>
@@ -104,6 +109,7 @@
     <span style="--c:var(--write)">write</span>
     <span style="--c:var(--search)">search</span>
     <span style="--c:var(--exec)">exec</span>
+    <span style="--c:var(--start)">session start</span>
   </div>
   <h3>Live feed</h3>
   <ol id="feed"></ol>
@@ -117,10 +123,13 @@
   'use strict';
 
   /* ================= config ================= */
-  const COLORS = { read: '#3ad6ff', edit: '#ff4fd8', write: '#ff9f40', search: '#ffe066', exec: '#5dff9b' };
+  const COLORS = { read: '#3ad6ff', edit: '#ff4fd8', write: '#ff9f40', search: '#ffe066', exec: '#5dff9b', start: '#ffffff' };
   const IDLE = '#6f7cff';
   const GLOW_MS = 20000;     // how long a touched neuron keeps glowing
   const FEED_MAX = 250;
+  // in "Current session" mode, switch to another session that becomes active
+  // once the shown one has been quiet this long (a new session start switches at once)
+  const SWITCH_IDLE_MS = 2 * 60 * 1000;
 
   /* ================= state ================= */
   const canvas = document.getElementById('web');
@@ -129,7 +138,8 @@
 
   let allEvents = [];
   const seen = new Set();
-  const sessions = new Map(); // id -> {first, cwd, count}
+  const sessions = new Map(); // id -> {first, last, root, count}
+  let liveMode = true;       // follow the session Claude is working in right now
   let filterSession = '';
   let highlight = '';
   let paused = false;
@@ -150,8 +160,11 @@
   const key = (p) => (/^[a-z]:\//i.test(p) ? p.toLowerCase() : p);
   const base = (p) => { const s = p.split('/').filter(Boolean); return s.length ? s[s.length - 1] : p; };
 
+  // the directory the session was opened in (its first event, normally the SessionStart)
+  const rootOf = (ev) => norm((sessions.get(ev.session) || {}).root || ev.cwd);
+
   function relPath(ev) {
-    const cwd = norm(ev.cwd), p = norm(ev.path);
+    const cwd = rootOf(ev), p = norm(ev.path);
     if (cwd && key(p).startsWith(key(cwd) + '/')) return p.slice(cwd.length + 1);
     if (cwd && key(p) === key(cwd)) return base(cwd) + '/';
     return p;
@@ -178,7 +191,7 @@
   }
 
   function chainFor(ev) {
-    const cwd = norm(ev.cwd), p = norm(ev.path);
+    const cwd = rootOf(ev), p = norm(ev.path);
     let rootFull, rel;
     if (cwd && (key(p) === key(cwd) || key(p).startsWith(key(cwd) + '/'))) {
       rootFull = cwd; rel = p.slice(cwd.length + 1);
@@ -222,6 +235,7 @@
     for (const ev of list.slice(-FEED_MAX)) addFeed(ev, false);
     alpha = 1;
     updateStats();
+    updateWhere();
     // let the layout settle a bit before framing it
     for (let i = 0; i < 120; i++) step();
     fit(true);
@@ -234,19 +248,70 @@
     if (!ev || !ev.path || seen.has(ev.id)) return;
     seen.add(ev.id);
     allEvents.push(ev);
+    const prev = sessions.get(ev.session);
+    const prevShown = sessions.get(filterSession);
+    const shownLast = prevShown ? prevShown.last : 0;
     trackSession(ev);
-    if (filterSession && ev.session !== filterSession) return;
     if (!live) return;
+    if (liveMode && ev.session !== filterSession &&
+        (ev.action === 'start' || !prevShown || ev.ts - shownLast > SWITCH_IDLE_MS || !prev && !filterSession)) {
+      // Claude is now working in another session: show that one instead
+      filterSession = ev.session;
+      updateLiveLabel();
+      rebuild();
+      const target = chainFor(ev).pop();
+      rings.push({ n: target, color: COLORS[ev.action] || IDLE, t0: performance.now() });
+      return;
+    }
+    if (filterSession && ev.session !== filterSession) return;
     applyEvent(ev, true);
     addFeed(ev, true);
     updateStats();
+    updateWhere();
     renderEmpty();
+  }
+
+  function latestSession() {
+    let best = '', bestTs = -1;
+    for (const [id, s] of sessions) if (s.last > bestTs) { best = id; bestTs = s.last; }
+    return best;
+  }
+
+  const sessionName = (s) => `${base(norm(s.root)) || '?'} · ${new Date(s.first).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
+
+  function updateLiveLabel() {
+    const s = sessions.get(filterSession);
+    $('opt-live').textContent = s && liveMode ? `Current session — ${sessionName(s)}` : 'Current session';
+  }
+
+  // HUD: where the shown session was opened, and where Claude is working now
+  function updateWhere() {
+    const el = $('where');
+    el.innerHTML = '';
+    const s = filterSession && sessions.get(filterSession);
+    if (!s) return;
+    const list = visibleEvents();
+    const lastEv = list[list.length - 1];
+    const line = (label, value) => {
+      const d = document.createElement('div');
+      const b = document.createElement('b');
+      b.textContent = value;
+      d.append(label + ' ', b);
+      d.title = value;
+      el.appendChild(d);
+    };
+    line('opened in', norm(s.root));
+    if (lastEv && lastEv.action !== 'start') {
+      const p = norm(lastEv.path);
+      const dir = lastEv.kind === 'dir' ? p : p.slice(0, p.lastIndexOf('/')) || p;
+      line('working in', dir);
+    }
   }
 
   function trackSession(ev) {
     let s = sessions.get(ev.session);
     if (!s) {
-      s = { first: ev.ts, cwd: ev.cwd, count: 0 };
+      s = { first: ev.ts, last: ev.ts, root: ev.action === 'start' ? ev.path : ev.cwd, count: 0 };
       sessions.set(ev.session, s);
       const opt = document.createElement('option');
       opt.value = ev.session;
@@ -254,13 +319,15 @@
       $('session').appendChild(opt);
     }
     s.count++;
+    s.last = Math.max(s.last, ev.ts);
     const opt = document.getElementById('opt-' + ev.session);
-    if (opt) opt.textContent = `${base(norm(s.cwd)) || '?'} · ${new Date(s.first).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · ${s.count}`;
+    if (opt) opt.textContent = `${sessionName(s)} · ${s.count}`;
   }
 
   function resetAll() {
     allEvents = []; seen.clear(); sessions.clear();
-    $('session').innerHTML = '<option value="">All sessions</option>';
+    $('session').innerHTML = '<option value="@live" id="opt-live">Current session</option><option value="">All sessions</option>';
+    $('session').value = liveMode ? '@live' : '';
     filterSession = '';
     rebuild();
   }
@@ -586,7 +653,12 @@
 
   $('fit').addEventListener('click', () => { $('follow').checked = false; fit(false); });
   $('pause').addEventListener('click', (e) => { paused = !paused; e.target.textContent = paused ? 'Resume' : 'Pause'; });
-  $('session').addEventListener('change', (e) => { filterSession = e.target.value; rebuild(); });
+  $('session').addEventListener('change', (e) => {
+    liveMode = e.target.value === '@live';
+    filterSession = liveMode ? latestSession() : e.target.value;
+    updateLiveLabel();
+    rebuild();
+  });
   $('search').addEventListener('input', (e) => { highlight = e.target.value.trim().toLowerCase(); });
   $('toggle').addEventListener('click', () => {
     const hidden = $('panel').classList.toggle('hidden');
@@ -622,6 +694,8 @@
     fetch('/api/history').then((r) => r.json()).then((data) => {
       if (data.demo) $('mode').textContent = 'demo mode — synthetic activity';
       for (const ev of data.events) ingest(ev, false);
+      if (liveMode) filterSession = latestSession();
+      updateLiveLabel();
       rebuild();
       ready = true;
       for (const ev of buffer) ingest(ev, true);

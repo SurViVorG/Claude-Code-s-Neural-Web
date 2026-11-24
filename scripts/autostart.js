@@ -21,16 +21,28 @@ const SERVER = path.join(__dirname, '..', 'server.js');
 
 setTimeout(() => process.exit(0), 5000).unref();
 
-function isRunning() {
+// Resolves to null when the server is down, otherwise { clients } (number of open UI tabs).
+function status() {
   return new Promise((resolve) => {
-    const req = http.get(`http://127.0.0.1:${PORT}/api/history`, (res) => {
-      res.resume();
-      resolve(res.statusCode === 200);
+    const req = http.get(`http://127.0.0.1:${PORT}/api/status`, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => (body += c));
+      res.on('end', () => {
+        if (res.statusCode !== 200) return resolve(null);
+        try {
+          resolve(JSON.parse(body));
+        } catch {
+          resolve(null);
+        }
+      });
     });
     req.setTimeout(600, () => req.destroy());
-    req.on('error', () => resolve(false));
+    req.on('error', () => resolve(null));
   });
 }
+
+const isRunning = async () => (await status()) !== null;
 
 function openBrowser() {
   const opts = { detached: true, stdio: 'ignore', windowsHide: true };
@@ -41,7 +53,12 @@ function openBrowser() {
 
 (async () => {
   try {
-    if (await isRunning()) return process.exit(0);
+    const s = await status();
+    if (s) {
+      // already running: only open a tab if none is showing the web right now
+      if (s.clients === 0 && process.env.NEURAL_WEB_NO_BROWSER !== '1') openBrowser();
+      return process.exit(0);
+    }
 
     spawn(process.execPath, [SERVER], {
       detached: true,

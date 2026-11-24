@@ -157,6 +157,12 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/status') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, demo: DEMO, clients: clients.size }));
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/history') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ demo: DEMO, log: DEMO ? null : LOG, events: readHistory() }));

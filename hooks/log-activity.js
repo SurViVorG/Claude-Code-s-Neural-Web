@@ -49,13 +49,37 @@ function norm(p) {
   return String(p).replace(/\\/g, '/').replace(/(.)\/+$/, '$1');
 }
 
+function append(event) {
+  fs.mkdirSync(path.dirname(LOG), { recursive: true });
+  fs.appendFileSync(LOG, JSON.stringify(event) + '\n');
+}
+
+const newId = () => Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+
 function record(payload) {
+  const cwd = payload.cwd || process.cwd();
+
+  // SessionStart: remember where the session was opened (its root neuron).
+  if (payload.hook_event_name === 'SessionStart') {
+    if (payload.source === 'compact') return; // same session, nothing new
+    append({
+      id: newId(),
+      ts: Date.now(),
+      session: payload.session_id || 'unknown',
+      cwd: norm(cwd),
+      tool: 'SessionStart',
+      action: 'start',
+      path: norm(cwd),
+      kind: 'dir',
+    });
+    return;
+  }
+
   const tool = payload.tool_name;
   const action = ACTIONS[tool];
   if (!action) return;
 
   const input = payload.tool_input || {};
-  const cwd = payload.cwd || process.cwd();
 
   // Which path did the tool touch? Shell commands map to the working directory.
   let target = input.file_path || input.notebook_path || input.path || cwd;
@@ -69,8 +93,8 @@ function record(payload) {
     /* path may not exist (e.g. failed read); keep the guess */
   }
 
-  const event = {
-    id: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
+  append({
+    id: newId(),
     ts: Date.now(),
     session: payload.session_id || 'unknown',
     cwd: norm(cwd),
@@ -78,8 +102,5 @@ function record(payload) {
     action,
     path: norm(target),
     kind,
-  };
-
-  fs.mkdirSync(path.dirname(LOG), { recursive: true });
-  fs.appendFileSync(LOG, JSON.stringify(event) + '\n');
+  });
 }
