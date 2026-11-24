@@ -7,9 +7,16 @@
 const path = require('path');
 
 const hook = path.resolve(__dirname, '..', 'hooks', 'log-activity.js').replace(/\\/g, '/');
+const autostart = path.resolve(__dirname, 'autostart.js').replace(/\\/g, '/');
 
 const config = {
   hooks: {
+    SessionStart: [
+      {
+        matcher: 'startup',
+        hooks: [{ type: 'command', command: `node "${autostart}"` }],
+      },
+    ],
     PostToolUse: [
       {
         matcher: 'Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep|Bash|PowerShell',

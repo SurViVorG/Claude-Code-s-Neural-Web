@@ -50,6 +50,14 @@ It prints something like:
 ```json
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          { "type": "command", "command": "node \"/path/to/neural-web/scripts/autostart.js\"" }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Read|Edit|MultiEdit|Write|NotebookEdit|Glob|Grep|Bash|PowerShell",
@@ -70,19 +78,33 @@ Merge it into one of Claude Code's settings files:
 | `<project>/.claude/settings.json` | one project, shared with your team |
 | `<project>/.claude/settings.local.json` | one project, just for you |
 
-If the file already has a `"hooks"` section, add the `PostToolUse` entry to it instead of
-replacing it. Restart Claude Code (or run `/hooks` to check it was picked up).
+If the file already has a `"hooks"` section, add the `SessionStart` and `PostToolUse`
+entries to it instead of replacing it. Restart Claude Code (or run `/hooks` to check it was
+picked up).
+
+The two hooks do different jobs:
+
+- **`PostToolUse`** records every file Claude touches. This one is required.
+- **`SessionStart`** (optional) opens the Neural Web automatically: when a Claude Code
+  session starts and the server is not running yet, it starts the server in the background
+  and opens <http://localhost:4747> in your browser. If the server is already running it
+  does nothing, so new sessions don't open extra tabs. Set `NEURAL_WEB_NO_BROWSER=1` to
+  start the server without opening the browser. Leave this hook out if you prefer to run
+  `npm start` yourself.
 
 > On Windows, `~` is `C:\Users\<you>`, so the global file is
 > `C:\Users\<you>\.claude\settings.json`.
 
 ### 3. Start the Neural Web
 
+With the `SessionStart` hook installed, just start Claude Code: the UI opens by itself.
+Otherwise run:
+
 ```bash
 npm start
 ```
 
-Open <http://localhost:4747> and start a Claude Code session in any project. Neurons appear
+and open <http://localhost:4747>, then start a Claude Code session in any project. Neurons appear
 as soon as Claude touches a file.
 
 ## Using the Neural Web
@@ -167,8 +189,9 @@ last 20,000 lines.
 
 ## Uninstall
 
-Remove the `PostToolUse` entry from your `settings.json` and delete
-`~/.claude/neural-web/`.
+Remove the `SessionStart` and `PostToolUse` entries from your `settings.json`, stop the
+server (it keeps running in the background if the autostart hook launched it — close the
+`node` process listening on port 4747), and delete `~/.claude/neural-web/`.
 
 ## Project layout
 
@@ -176,6 +199,7 @@ Remove the `PostToolUse` entry from your `settings.json` and delete
 neural-web/
 ├── hooks/log-activity.js       # Claude Code hook → appends to the activity log
 ├── public/index.html           # the Neural Web UI (canvas, no dependencies)
+├── scripts/autostart.js        # SessionStart hook → starts the server + opens the browser
 ├── scripts/print-hook-config.js# prints the settings.json snippet for this checkout
 ├── server.js                   # serves the UI, tails the log, streams via SSE
 └── package.json
