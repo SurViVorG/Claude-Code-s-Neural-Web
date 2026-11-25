@@ -150,6 +150,8 @@
   let vis = [];              // neurons currently on screen
   let pulses = [];
   let rings = [];
+  let sparks = [];           // small energy packets flowing along active dendrites
+  let ghosts = [];           // dendrites retracting into a folder that was just collapsed
 
   const trees = new Map();   // key(folder) -> directory listing from the server
   const loading = new Set();
@@ -185,6 +187,8 @@
     n = {
       id, label, full, type, parent, kids: [],
       x: 0, y: 0, depth: 0, w: 1, shown: false,
+      // tx/ty = layout target; x/y = drawn position that glides towards it
+      tx: 0, ty: 0, born: 0, g: 1, dg: 0, dc: null, kick: 0, charge: 0,
       hits: 0, last: 0, color: IDLE, actions: {},
       collapsed: userOpen.has(id) ? userOpen.get(id) : undefined,
       loaded: true,           // false = folder listed but its contents not fetched yet
@@ -235,14 +239,17 @@
     target.hits++;
     target.actions[ev.action] = (target.actions[ev.action] || 0) + 1;
     target.deleted = ev.action === 'delete';
-    // the whole path lights up, so a collapsed folder still shows activity inside it
-    for (const n of chain) { n.last = Math.max(n.last, ev.ts); n.color = color; }
-    if (live) {
-      if (nodes.size !== before) relayout();
-      const shownChain = chain.filter((n) => n.shown);
-      pulses.push({ chain: shownChain, color, t0: performance.now() });
-      if ($('follow').checked) focusOn(shownChain[shownChain.length - 1], Math.max(cam.k, 1));
+    if (!live) {
+      // the whole path lights up, so a collapsed folder still shows activity inside it
+      for (const n of chain) { n.last = Math.max(n.last, ev.ts); n.color = color; }
+      return target;
     }
+    if (nodes.size !== before) relayout();
+    const shownChain = chain.filter((n) => n.shown);
+    // hidden neurons light up now; the ones on screen light up as the energy reaches them
+    for (const n of chain) if (!n.shown) { n.last = Math.max(n.last, ev.ts); n.color = color; }
+    pulses.push({ chain: shownChain, color, t0: performance.now(), lit: 0, dur: 0 });
+    if ($('follow').checked) focusOn(shownChain[shownChain.length - 1], Math.max(cam.k, 1));
     return target;
   }
 
@@ -254,7 +261,7 @@
   }
 
   function rebuild() {
-    nodes = new Map(); pulses = []; rings = [];
+    nodes = new Map(); pulses = []; rings = []; sparks = []; ghosts = [];
     $('feed').innerHTML = '';
     for (const r of shownRoots()) {
       const rn = ensureNode(key(r), base(r), r, 'root', null);
@@ -355,8 +362,8 @@
 
   function place(n, cx, cy, step, a0, a1) {
     const a = (a0 + a1) / 2, r = n.depth * step;
-    n.x = cx + Math.cos(a) * r;
-    n.y = cy + Math.sin(a) * r;
+    n.tx = cx + Math.cos(a) * r;
+    n.ty = cy + Math.sin(a) * r;
     if (n.collapsed || !n.kids.length) return;
     let s = a0;
     for (const c of n.kids) {
@@ -367,6 +374,9 @@
   }
 
   function relayout() {
+    const now = performance.now();
+    const prev = vis;
+    const prevSet = new Set(prev);
     applyDefaults();
     for (const n of nodes.values()) n.shown = false;
     vis = [];
@@ -382,7 +392,20 @@
     }
     // keep the whole picture centred on the origin
     const shift = cursor > 0 ? (cursor - 160) / 2 : 0;
-    for (const n of vis) n.x -= shift;
+    for (const n of vis) n.tx -= shift;
+
+    // neurons that just appeared grow out of their parent, one ring after another
+    const fresh = vis.filter((n) => !prevSet.has(n));
+    const minD = fresh.reduce((m, n) => Math.min(m, n.depth), Infinity);
+    for (const n of fresh) {  // preorder: a parent is placed before its children
+      n.born = now + Math.min(900, (n.depth - minD) * 80);
+      n.g = 0;
+      if (n.parent) { n.x = n.parent.x; n.y = n.parent.y; } else { n.x = n.tx; n.y = n.ty; }
+    }
+    // neurons that just disappeared retract into the folder that hid them
+    for (const n of prev) {
+      if (!n.shown && nodes.get(n.id) === n && n.g > 0.05) ghosts.push({ n, t0: now, fx: n.x, fy: n.y, x: n.x, y: n.y });
+    }
     updateStats();
   }
 
@@ -547,13 +570,13 @@
 
   function focusOn(n, k) {
     if (!n) return;
-    Object.assign(camGoal, { x: n.x + panelShift(k), y: n.y, k, active: true });
+    Object.assign(camGoal, { x: n.tx + panelShift(k), y: n.ty, k, active: true });
   }
 
   function fit(instant) {
     if (!vis.length) { Object.assign(camGoal, { x: 0, y: 0, k: 1, active: true }); return; }
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const n of vis) { x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y); x1 = Math.max(x1, n.x); y1 = Math.max(y1, n.y); }
+    for (const n of vis) { x0 = Math.min(x0, n.tx); y0 = Math.min(y0, n.ty); x1 = Math.max(x1, n.tx); y1 = Math.max(y1, n.ty); }
     const usableW = W - (panelOpen() && W > 640 ? 360 : 0) - 80;
     const k = Math.max(0.05, Math.min(2.2, usableW / (x1 - x0 + 80), (H - 120) / (y1 - y0 + 80)));
     Object.assign(camGoal, { x: (x0 + x1) / 2 + panelShift(k), y: (y0 + y1) / 2, k, active: true });
@@ -580,92 +603,245 @@
     return [mx - (b.y - a.y) * 0.12, my + (b.x - a.x) * 0.12];
   }
 
-  function draw(now) {
+  /* ---------- animation helpers ---------- */
+  const GROW_MS = 520;       // a new dendrite takes this long to reach its neuron
+  const GHOST_MS = 380;      // a hidden dendrite takes this long to retract
+  const SPARK_MAX = 220;
+  const rgbCache = {};
+  const hexRgb = (h) => rgbCache[h] || (rgbCache[h] = (() => { const v = parseInt(h.slice(1), 16); return [v >> 16, (v >> 8) & 255, v & 255]; })());
+  const IDLE_RGB = hexRgb(IDLE);
+  const col = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${Math.max(0, Math.min(1, a))})`;
+  // frame-rate independent smoothing: fraction of the way to go after dt ms
+  const ease = (dt, tau) => 1 - Math.exp(-dt / tau);
+  const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+  const easeIn = (t) => t * t * t;
+  const easeInOut = (t) => 0.5 - Math.cos(Math.PI * t) / 2;
+  const clamp01 = (t) => Math.max(0, Math.min(1, t));
+  const quadAt = (a, c, b, u) => { const v = 1 - u; return v * v * a + 2 * v * u * c + u * u * b; };
+
+  function edgePoint(a, b, u) {
+    const [cx, cy] = ctrl(a, b);
+    return [quadAt(a.x, cx, b.x, u), quadAt(a.y, cy, b.y, u)];
+  }
+
+  function chainLengths(ch) {
+    const L = [0];
+    for (let i = 1; i < ch.length; i++) L.push(L[i - 1] + Math.hypot(ch[i].x - ch[i - 1].x, ch[i].y - ch[i - 1].y) * 1.02);
+    return L;
+  }
+
+  function chainPoint(ch, L, d) {
+    let i = 0;
+    while (i < ch.length - 2 && L[i + 1] < d) i++;
+    const u = clamp01((d - L[i]) / ((L[i + 1] - L[i]) || 1));
+    return edgePoint(ch[i], ch[i + 1], u);
+  }
+
+  // energy reached this neuron: it flashes, swells, and the dendrite into it charges up
+  function lightNode(n, color) {
+    n.last = Math.max(n.last, Date.now());
+    n.color = color;
+    n.kick = 1;
+    n.charge = 1;
+  }
+
+  // if animations are dropped, the neurons they were heading to still light up
+  function flushPulses() {
+    for (const p of pulses) for (let i = p.lit; i < p.chain.length; i++) lightNode(p.chain[i], p.color);
+    pulses = [];
+  }
+
+  // per-frame state: positions glide, colours and glow blend, new dendrites grow
+  function step(now, dt, wall) {
+    const kp = ease(dt, 170), kc = ease(dt, 280), kg = ease(dt, 140);
+    const kk = ease(dt, 320), kq = ease(dt, 750);
+    for (const n of vis) {
+      const gT = n.last ? Math.exp(-(wall - n.last) / GLOW_MS) : 0;
+      const mix = Math.min(1, gT / 0.12);  // fade back to idle blue as the glow dies out
+      const src = hexRgb(n.color);
+      const r = IDLE_RGB[0] + (src[0] - IDLE_RGB[0]) * mix;
+      const g = IDLE_RGB[1] + (src[1] - IDLE_RGB[1]) * mix;
+      const b = IDLE_RGB[2] + (src[2] - IDLE_RGB[2]) * mix;
+      if (!n.dc) { n.dc = [r, g, b]; n.dg = gT; }
+      else {
+        n.dc[0] += (r - n.dc[0]) * kc; n.dc[1] += (g - n.dc[1]) * kc; n.dc[2] += (b - n.dc[2]) * kc;
+        n.dg += (gT - n.dg) * kg;
+      }
+      n.kick -= n.kick * kk;
+      n.charge -= n.charge * kq;
+
+      const grow = n.born ? clamp01((now - n.born) / GROW_MS) : 1;
+      n.g = easeOut(grow);
+      if (grow < 1 && n.parent) {
+        // ride out along the dendrite from the parent to the layout position
+        const p = n.parent, t = { x: n.tx, y: n.ty };
+        const [cx, cy] = ctrl(p, t);
+        n.x = quadAt(p.x, cx, n.tx, n.g);
+        n.y = quadAt(p.y, cy, n.ty, n.g);
+      } else {
+        n.x += (n.tx - n.x) * kp;
+        n.y += (n.ty - n.y) * kp;
+      }
+
+      // active dendrites keep carrying small packets of energy outwards
+      if (n.parent && n.g >= 1 && n.dg > 0.08 && sparks.length < SPARK_MAX && Math.random() < n.dg * dt * 0.0011) {
+        sparks.push({ n, t0: now, dur: 650 + Math.random() * 550 });
+      }
+    }
+  }
+
+  function draw(now, dt) {
     const wall = Date.now();
+    step(now, dt, wall);
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     const bg = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) * 0.75);
     bg.addColorStop(0, '#0b0e24'); bg.addColorStop(1, '#03040b');
     ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
 
-    const k = cam.k;
+    const k = cam.k, sk = Math.sqrt(k);
     ctx.setTransform(DPR * k, 0, 0, DPR * k, DPR * (W / 2 - cam.x * k), DPR * (H / 2 - cam.y * k));
 
     // synapses
     ctx.globalCompositeOperation = 'lighter';
     for (const n of vis) {
-      if (!n.parent) continue;
-      const glow = Math.exp(-(wall - n.last) / GLOW_MS);
-      ctx.strokeStyle = matches(n) ? 'rgba(255,255,255,.6)' : rgba(glow > 0.05 ? n.color : IDLE, 0.12 + glow * 0.55);
-      ctx.lineWidth = (0.8 + glow * 1.6) / Math.sqrt(k);
-      const [cx, cy] = ctrl(n.parent, n);
+      if (!n.parent || n.g <= 0.001) continue;
+      const glow = n.dg, ch = n.charge;
+      ctx.strokeStyle = matches(n) ? 'rgba(255,255,255,.6)' : col(n.dc, (0.12 + glow * 0.55 + ch * 0.6) * (0.3 + 0.7 * n.g));
+      ctx.lineWidth = (0.8 + glow * 1.6 + ch * 2.2) / sk;
+      const p = n.parent;
+      const [cx, cy] = ctrl(p, n);
       ctx.beginPath();
-      ctx.moveTo(n.parent.x, n.parent.y);
+      ctx.moveTo(p.x, p.y);
       ctx.quadraticCurveTo(cx, cy, n.x, n.y);
       ctx.stroke();
     }
 
-    // action potentials travelling down the dendrites
-    pulses = pulses.filter((p) => {
-      const segs = p.chain.length - 1;
-      if (segs < 0) return false;
-      const dur = 160 * Math.max(segs, 1);
-      // the frame timestamp can be a little older than t0 (set in an event handler)
-      const t = Math.max(0, (now - p.t0) / dur);
-      if (t >= 1) { rings.push({ n: p.chain[segs], color: p.color, t0: now }); return false; }
-      let x, y;
-      if (segs === 0) { x = p.chain[0].x; y = p.chain[0].y; }
-      else {
-        const f = t * segs, i = Math.floor(f), u = f - i;
-        const a = p.chain[i], b = p.chain[i + 1];
-        const [mx, my] = ctrl(a, b);
-        x = (1 - u) * (1 - u) * a.x + 2 * (1 - u) * u * mx + u * u * b.x;
-        y = (1 - u) * (1 - u) * a.y + 2 * (1 - u) * u * my + u * u * b.y;
-      }
-      const g = ctx.createRadialGradient(x, y, 0, x, y, 14);
-      g.addColorStop(0, rgba(p.color, 0.95)); g.addColorStop(0.3, rgba(p.color, 0.4)); g.addColorStop(1, rgba(p.color, 0));
-      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, 14, 0, Math.PI * 2); ctx.fill();
+    // dendrites retracting into a collapsed folder
+    const gpos = new Map();
+    ghosts = ghosts.filter((gh) => {
+      const n = gh.n;
+      const t = (now - gh.t0) / GHOST_MS;
+      if (t >= 1 || n.shown || nodes.get(n.id) !== n) return false;
+      let anchor = n.parent;
+      while (anchor && !anchor.shown) anchor = anchor.parent;
+      if (!anchor) return false;
+      const u = 1 - easeIn(clamp01(t));
+      gh.x = anchor.x + (gh.fx - anchor.x) * u;
+      gh.y = anchor.y + (gh.fy - anchor.y) * u;
+      gpos.set(n, gh);
+      const from = n.parent.shown ? n.parent : gpos.get(n.parent) || anchor;
+      const c = n.dc || IDLE_RGB, a = 1 - t;
+      ctx.strokeStyle = col(c, (0.12 + n.dg * 0.5) * a);
+      ctx.lineWidth = (0.8 + n.dg * 1.6) / sk;
+      const [cx, cy] = ctrl(from, gh);
+      ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.quadraticCurveTo(cx, cy, gh.x, gh.y); ctx.stroke();
+      ctx.fillStyle = col(c, 0.5 * a);
+      ctx.beginPath(); ctx.arc(gh.x, gh.y, radius(n) * u, 0, Math.PI * 2); ctx.fill();
       return true;
     });
 
-    // firing rings
+    // ambient energy packets flowing along active dendrites
+    sparks = sparks.filter((s) => {
+      const n = s.n, t = (now - s.t0) / s.dur;
+      if (t >= 1 || !n.shown || !n.parent) return false;
+      const [x, y] = edgePoint(n.parent, n, easeInOut(t));
+      const a = Math.sin(Math.PI * t) * (0.35 + 0.65 * Math.sqrt(n.dg));
+      const r = 2.2 / sk;
+      ctx.fillStyle = col(n.dc, a * 0.22);
+      ctx.beginPath(); ctx.arc(x, y, r * 3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = col(n.dc, a);
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+      return true;
+    });
+
+    // action potentials travelling down the dendrites, leaving a comet trail
+    pulses = pulses.filter((p) => {
+      const ch = p.chain;
+      const segs = ch.length - 1;
+      if (segs < 0) return false;
+      if (ch.some((n) => !n.shown)) { for (let i = p.lit; i < ch.length; i++) lightNode(ch[i], p.color); return false; }
+      const L = chainLengths(ch), total = L[segs];
+      if (!p.dur) p.dur = segs ? Math.max(380, Math.min(1700, total / 0.75)) : 260;
+      // the frame timestamp can be a little older than t0 (set in an event handler)
+      const t = clamp01((now - p.t0) / p.dur);
+      const d = total * easeInOut(t);
+      while (p.lit <= segs && L[p.lit] <= d + 0.5) lightNode(ch[p.lit++], p.color);
+      if (t >= 1) {
+        while (p.lit <= segs) lightNode(ch[p.lit++], p.color);
+        rings.push({ n: ch[segs], color: p.color, t0: now });
+        return false;
+      }
+      const rgb = hexRgb(p.color);
+      if (segs) {
+        const TRAIL = 16, gap = 5;
+        for (let i = TRAIL; i >= 1; i--) {
+          const dd = d - i * gap;
+          if (dd < 0) continue;
+          const [x, y] = chainPoint(ch, L, dd);
+          const f = 1 - i / TRAIL;
+          ctx.fillStyle = col(rgb, 0.08 + f * 0.45);
+          ctx.beginPath(); ctx.arc(x, y, 1 + f * 4, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+      const [x, y] = segs ? chainPoint(ch, L, d) : [ch[0].x, ch[0].y];
+      const flick = 1 + Math.sin(now / 45) * 0.12;
+      const R = 15 * flick;
+      const g = ctx.createRadialGradient(x, y, 0, x, y, R);
+      g.addColorStop(0, 'rgba(255,255,255,0.95)');
+      g.addColorStop(0.15, col(rgb, 0.95)); g.addColorStop(0.4, col(rgb, 0.35)); g.addColorStop(1, col(rgb, 0));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
+      return true;
+    });
+
+    // firing rings (two staggered waves)
     rings = rings.filter((r) => {
-      const t = Math.max(0, (now - r.t0) / 900);
+      const t = Math.max(0, (now - r.t0) / 1100);
       if (t >= 1 || !r.n.shown) return false;
-      ctx.strokeStyle = rgba(r.color, (1 - t) * 0.9);
-      ctx.lineWidth = 2 / k;
-      ctx.beginPath(); ctx.arc(r.n.x, r.n.y, radius(r.n) + t * 28, 0, Math.PI * 2); ctx.stroke();
+      for (const [off, s] of [[0, 1], [0.18, 0.6]]) {
+        const u = (t - off) / (1 - off);
+        if (u <= 0) continue;
+        const e = easeOut(u);
+        ctx.strokeStyle = rgba(r.color, (1 - u) * 0.85 * s);
+        ctx.lineWidth = (2.2 - u * 1.4) / k;
+        ctx.beginPath(); ctx.arc(r.n.x, r.n.y, radius(r.n) + e * 30 * s, 0, Math.PI * 2); ctx.stroke();
+      }
       return true;
     });
 
     // neurons
     for (const n of vis) {
-      const glow = Math.exp(-(wall - n.last) / GLOW_MS);
-      const r = radius(n);
-      const c = glow > 0.02 ? n.color : IDLE;
+      if (n.g <= 0.01) continue;
+      const glow = n.dg, c = n.dc, a = n.g;
+      const r = radius(n) * (0.35 + 0.65 * n.g) * (1 + 0.5 * n.kick);
       if (glow > 0.02 || n.type !== 'file') {
-        const halo = r * (2.2 + glow * 3);
+        const halo = r * (2.2 + glow * 3 + n.kick * 2);
         const g = ctx.createRadialGradient(n.x, n.y, r * 0.3, n.x, n.y, halo);
-        g.addColorStop(0, rgba(c, 0.25 + glow * 0.5)); g.addColorStop(1, rgba(c, 0));
+        g.addColorStop(0, col(c, (0.25 + glow * 0.5 + n.kick * 0.3) * a)); g.addColorStop(1, col(c, 0));
         ctx.fillStyle = g; ctx.beginPath(); ctx.arc(n.x, n.y, halo, 0, Math.PI * 2); ctx.fill();
       }
       // files Claude never touched are dimmer than the ones it did
       const fileA = n.hits ? 0.55 + glow * 0.45 : 0.3;
-      ctx.fillStyle = rgba(c, n.type === 'file' ? fileA : 0.25 + glow * 0.4);
+      ctx.fillStyle = col(c, (n.type === 'file' ? fileA : 0.25 + glow * 0.4) * a);
       ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2); ctx.fill();
+      if (n.kick > 0.02) {
+        ctx.fillStyle = `rgba(255,255,255,${n.kick * 0.7 * a})`;
+        ctx.beginPath(); ctx.arc(n.x, n.y, r * 0.55, 0, Math.PI * 2); ctx.fill();
+      }
       if (n.type !== 'file') {
-        ctx.strokeStyle = rgba(c, 0.7 + glow * 0.3); ctx.lineWidth = 1.4 / Math.sqrt(k); ctx.stroke();
-        ctx.fillStyle = rgba('#ffffff', 0.6 + glow * 0.4);
+        ctx.strokeStyle = col(c, (0.7 + glow * 0.3) * a); ctx.lineWidth = 1.4 / sk; ctx.stroke();
+        ctx.fillStyle = `rgba(255,255,255,${(0.6 + glow * 0.4) * a})`;
         ctx.beginPath(); ctx.arc(n.x, n.y, r * 0.35, 0, Math.PI * 2); ctx.fill();
         if (n.collapsed) {
-          // dashed outer ring = folder with hidden contents
+          // dashed outer ring = folder with hidden contents; it turns while there is activity inside
           ctx.setLineDash([3 / k, 3 / k]);
-          ctx.strokeStyle = rgba(c, 0.8); ctx.lineWidth = 1.2 / k;
+          ctx.lineDashOffset = glow > 0.05 ? (-now * 0.008 * glow) / k : 0;
+          ctx.strokeStyle = col(c, 0.8 * a); ctx.lineWidth = 1.2 / k;
           ctx.beginPath(); ctx.arc(n.x, n.y, r + 4 / k + 2, 0, Math.PI * 2); ctx.stroke();
-          ctx.setLineDash([]);
+          ctx.setLineDash([]); ctx.lineDashOffset = 0;
         }
       }
       if (n.deleted) {
-        ctx.strokeStyle = rgba(COLORS.delete, 0.9); ctx.lineWidth = 1.5 / k;
+        ctx.strokeStyle = rgba(COLORS.delete, 0.9 * a); ctx.lineWidth = 1.5 / k;
         ctx.beginPath(); ctx.moveTo(n.x - r, n.y - r); ctx.lineTo(n.x + r, n.y + r); ctx.stroke();
       }
       if (matches(n)) {
@@ -679,13 +855,15 @@
     const allLabels = $('labels').checked;
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     for (const n of vis) {
-      const glow = Math.exp(-(wall - n.last) / GLOW_MS);
+      if (n.g < 0.4) continue;
+      const glow = n.dg;
       const show = n.type === 'root' || n === hover || matches(n) || allLabels || glow > 0.25 ||
         (n.type === 'dir' && k > 0.6) || (n.type === 'file' && k > 1.3);
       if (!show) continue;
+      const fade = (n.g - 0.4) / 0.6;
       const size = (n.type === 'root' ? 13 : 11) / k;
       ctx.font = `${n.type === 'file' ? 400 : 600} ${size}px ui-sans-serif, system-ui, sans-serif`;
-      ctx.fillStyle = n.type === 'root' ? '#ffffff' : rgba('#d9defa', (n.type === 'file' && !n.hits ? 0.45 : 0.6) + glow * 0.4);
+      ctx.fillStyle = n.type === 'root' ? `rgba(255,255,255,${fade})` : rgba('#d9defa', ((n.type === 'file' && !n.hits ? 0.45 : 0.6) + glow * 0.4) * fade);
       ctx.shadowColor = 'rgba(0,0,0,.9)'; ctx.shadowBlur = 4;
       const label = n.collapsed && n.type !== 'file' ? `${n.label} (${n.loaded ? n.kids.length : '…'})` : n.label;
       ctx.fillText(label, n.x, n.y + radius(n) + 4 / k);
@@ -693,23 +871,29 @@
     }
   }
 
+  let lastNow = 0;
   function frame(now) {
     // schedule the next frame first: an error while drawing must never freeze the map
     requestAnimationFrame(frame);
+    const dt = lastNow ? Math.min(100, Math.max(0, now - lastNow)) : 16;
+    lastNow = now;
     if (camGoal.active) {
-      cam.x += (camGoal.x - cam.x) * 0.15;
-      cam.y += (camGoal.y - cam.y) * 0.15;
-      cam.k += (camGoal.k - cam.k) * 0.15;
+      const a = ease(dt, 100);
+      cam.x += (camGoal.x - cam.x) * a;
+      cam.y += (camGoal.y - cam.y) * a;
+      cam.k += (camGoal.k - cam.k) * a;
       if (Math.abs(camGoal.x - cam.x) + Math.abs(camGoal.y - cam.y) < 0.5 && Math.abs(camGoal.k - cam.k) < 0.002) {
         Object.assign(cam, { x: camGoal.x, y: camGoal.y, k: camGoal.k });
         camGoal.active = false;
       }
     }
     try {
-      draw(now);
+      draw(now, dt);
     } catch (err) {
       console.error('[neural-web] draw error', err);
-      pulses = []; rings = []; // drop the animation that failed
+      // drop the animation that failed
+      try { flushPulses(); } catch (e) { pulses = []; }
+      rings = []; sparks = []; ghosts = [];
       ctx.globalCompositeOperation = 'source-over';
       ctx.setLineDash([]);
     }
